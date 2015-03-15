@@ -1,13 +1,18 @@
 #include<opencv2/opencv.hpp>
+#include<opencv2/core/eigen.hpp>
 #include<iostream>
 #include<fstream>
+#include<stdio.h>
 #include<math.h>
 #include<ctime>
 #include"utils.h"
 #include<omp.h>
 #include<sys/time.h>
+#include<Eigen/Dense>
+#include<Eigen/Eigenvalues>
 using namespace std;
 using namespace cv;
+using namespace Eigen;
 
 void out_file(char *var_name,cv::Mat &var)
 {
@@ -42,12 +47,27 @@ void out_liblinear(char *file_name,cv::Mat &feature,cv::Mat &label)
     }
     of.close();
 }
+void out_liblinear2(char *file_name,cv::Mat &feature,vector<uchar> &label)
+{
+    int length = feature.rows;
+    ofstream of(file_name);
+    for(int i=0;i<length;i++)
+    {
+        of<<(int)label[i]<<' ';
+        for(int j=1;j<=feature.cols;j++)
+        {
+            of<<j<<":"<<feature.at<float>(i,j-1)<<" ";
+        }
+        of<<'\n';
+    }
+    of.close();
+}
 template <class T>
 void out_mat(char *name,cv::Mat &in_mat)
 {
     ofstream of(name);
     //for(int row = 0 ; row<in_mat.rows; row++)
-    for(int row = 0 ; row<42; row++)
+    for(int row = 0 ; row<in_mat.rows; row++)
     {
         for(int col = 0; col<in_mat.cols;col++)
         {
@@ -241,6 +261,7 @@ void vec2img(vector<cv::Mat> &CIFAR_data)
 ///get the PCA filters of each stage
 cv::Mat PCA_FilterBank(vector<cv::Mat>& in_img, int patch_size, int num_filters)
 {
+
     //get all the mean-removed patches from the image
     int num_image=in_img.size();
     int size=in_img[0].channels()*patch_size*patch_size;//length of the patch vector
@@ -341,6 +362,7 @@ vector<cv::Mat> PCA_convolution_rmean(vector<cv::Mat> &src_img, cv::Mat &filter_
     const int num_elements = in_img_num*filter_mat.rows;
     int core_num = omp_get_num_procs();
     int in_img_rows=src_img[0].rows;//suppose all the rows are the same
+    int depth = src_img[0].depth();
 #pragma omp parallel for default(none) num_threads(core_num) shared(out_mat)
     //allocate the space
     for(int i=0;i<num_elements;i++)
@@ -349,7 +371,7 @@ vector<cv::Mat> PCA_convolution_rmean(vector<cv::Mat> &src_img, cv::Mat &filter_
         out_mat.push_back(filler);
     }
 
-#pragma omp parallel for default(none) num_threads(core_num) private(single_channel_images,padded_img,product_mat) shared(src_img,out_cols,pad,s,patch_size,filter_mat,in_img_rows,out_mat)
+#pragma omp parallel for default(none) num_threads(core_num) private(single_channel_images,padded_img,product_mat) shared(depth,src_img,out_cols,pad,s,patch_size,filter_mat,in_img_rows,out_mat)
     for(int img_num=0; img_num<in_img_num; img_num++)
     {
         //split the 3 channels
@@ -360,7 +382,7 @@ vector<cv::Mat> PCA_convolution_rmean(vector<cv::Mat> &src_img, cv::Mat &filter_
 
         //turn each channel of image into columns and combine the 3 channels
         cv::Mat temp,patch_mean;
-        cv::Mat combiled_img_cols=cv::Mat(0,out_cols,src_img[0].depth());
+        cv::Mat combiled_img_cols=cv::Mat(0,out_cols,depth);
 
         for(vector<cv::Mat>::iterator it=single_channel_images.begin();it!=single_channel_images.end();it++)
         {
@@ -383,7 +405,7 @@ vector<cv::Mat> PCA_convolution_rmean(vector<cv::Mat> &src_img, cv::Mat &filter_
         }
         single_channel_images.clear();
     }
-
+    src_img.clear();
     return out_mat;
 }
 
@@ -452,6 +474,7 @@ cv::Mat Spp(cv::Mat &BHist, const PCANet PCANet_params, const int img_width)
 
     //map the features to the corresponding indexes in out_mat
     int idx;
+    int offset=0;
     for(int layer=0;layer<layers;layer++)
     {
         int cnt=0;
@@ -461,20 +484,20 @@ cv::Mat Spp(cv::Mat &BHist, const PCANet PCANet_params, const int img_width)
             for(int col=start_idx; col<=end_idx; col+=stride)
             {
 
-                idx = (row/step)*PCANet_params.pyramid[layer]+col/step;
+                idx = (row/step)*PCANet_params.pyramid[layer]+col/step+offset;
                 out_mat.col(idx) = cv::max(BHist.col(cnt),out_mat.col(idx));
                 cnt++;
             }
         }
+        //plus this offset!
+        offset = offset+pow(2,PCANet_params.pyramid[layer]);
     }
 
-    /*FileStorage fs("outmat.xml",FileStorage::WRITE);
-    fs<<"out_mat"<<out_mat;
-    fs.release();*/
     return out_mat;
 }
 
 ///return value is a row vector of all the histograms
+///output mat is of dimension 10240*21
 cv::Mat HashingHist(vector<cv::Mat> &in_img, const PCANet PCANet_params)
 {
     int num_in_img=in_img.size();
@@ -482,7 +505,6 @@ cv::Mat HashingHist(vector<cv::Mat> &in_img, const PCANet PCANet_params)
     int num_img0 = num_in_img/num_filters;
     int row_in_img = in_img[0].rows;
     int col_in_img = in_img[0].cols;
-    int depth=in_img[0].depth();
 
     //get the weight constant
     float *w = new float[num_filters];
@@ -507,7 +529,9 @@ cv::Mat HashingHist(vector<cv::Mat> &in_img, const PCANet PCANet_params)
             Heaviside(*it_in_img);
 
             T = T + w[j]* (*it_in_img);
-            it_in_img = in_img.erase(it_in_img);
+            //it_in_img = in_img.erase(it_in_img);
+            it_in_img->release();
+            ++it_in_img;
         }
 
         cv::Mat blocks_mat = im2col_step<float>(T,PCANet_params.histBlockSize[0],stride);
@@ -521,37 +545,12 @@ cv::Mat HashingHist(vector<cv::Mat> &in_img, const PCANet PCANet_params)
         if(i==0)
             BHist = blocks_mat;
         else
-            hconcat(BHist,blocks_mat,BHist);
+            vconcat(BHist,blocks_mat,BHist);
     }
     delete[] w;
 
-    /*cv::Mat temp1,temp2,temp3;
-    for(int i=0;i<21;i++)
-    {
-        for(int j=0;j<40;j++)
-        {
-            if(j==0)
-                temp2 = BHist.col(i);
-            else
-            {
-                temp3 = BHist.col(i+j*21);
-                vconcat(temp2,temp3,temp2);
-            }
-        }
-        if(i==0)
-            temp1=temp2;
-        else
-            hconcat(temp1,temp2,temp1);
-    }
-
-    cv::Mat Rx,e_value_mat,e_vec_mat;
-    Rx = temp1*temp1.t();
-    eigen(Rx,e_value_mat,e_vec_mat);
-    out_mat<float>("eigen_1280",e_vec_mat);*/
-
-
     //use spatial pyramid pooling when the parameters are set, and vectorize
-    BHist = BHist.reshape(0,1);
+    //BHist = BHist.reshape(0,1);
 
     return BHist;
 }
@@ -561,13 +560,12 @@ cv::Mat HashingHist(vector<cv::Mat> &in_img, const PCANet PCANet_params)
 ///the label will match the last stage only
 PCATrainResult *PCANet_train(vector<cv::Mat> &train_batch_img, vector<uchar> &train_batch_type, const PCANet PCANet_params, bool extract_feature)
 {
+    cv::Mat filler = cv::Mat::zeros(1,1,CV_32FC1);
     PCATrainResult *train_result;
-    cv::Mat hashing_result;//each row is a result
     int num_inImg=train_batch_img.size();
     vector<cv::Mat> out_image = train_batch_img;
     train_batch_img.clear();
     vector<uchar> out_type = train_batch_type;
-
     //allocate storage
     train_result=new PCATrainResult;
 
@@ -583,7 +581,8 @@ PCATrainResult *PCANet_train(vector<cv::Mat> &train_batch_img, vector<uchar> &tr
         if(stage != PCANet_params.numStages-1)
             out_image=PCA_convolution_rmean(out_image,train_result->filters[stage],PCANet_params.patchSize[stage]);
     }
-
+    //out_image.clear();
+//should be 15G here if use the full dataset
     cout<<"Number of images after the first convolutions: "<<out_image.size()<<", size: "<<out_image[0].cols<<endl;
 
     struct timeval t1,t2;
@@ -591,40 +590,138 @@ PCATrainResult *PCANet_train(vector<cv::Mat> &train_batch_img, vector<uchar> &tr
     gettimeofday(&t1,NULL);
     if(extract_feature)
     {
-        const vector<cv::Mat>::iterator out_img_begin=out_image.begin();
-        const vector<uchar>::iterator out_type_begin=out_type.begin();
-        int last_stage=PCANet_params.numStages-2;//the array number of last stage
-        //initialize hashing_result for parallelism
-        int core_num = omp_get_thread_num();
-        ///large memory space
-        int cols = 0;
-        for(int i=0;i<PCANet_params.pyramid.size();i++)
-        {
-            cols+=PCANet_params.pyramid[i]*PCANet_params.pyramid[i];
-        }
-        cols = cols*PCANet_params.numFilters[0]*pow(2,PCANet_params.numFilters[1]);
-        hashing_result = cv::Mat::zeros(num_inImg,cols,CV_32FC1);
+        vector<cv::Mat>::iterator out_img_begin=out_image.begin();
 
-#pragma omp parallel for default(none) num_threads(core_num) shared(num_inImg,train_result,last_stage,hashing_result)
+        //initialize hashing_result for parallelism
+        int core_num = omp_get_num_procs();
+        ///large memory space
+        vector<cv::Mat> hashing_result_vec;
+        for(int i=0;i<num_inImg;i++)
+        {
+            hashing_result_vec.push_back(filler);
+        }
+        //to reduce memory usage, firstly get all the features, then perform PCA for all the 21 blocks
+        // if parallelism is used, out_image won't be able to free...
+//#pragma omp parallel for default(none) num_threads(core_num) shared(num_inImg,train_result,hashing_result_vec,out_img_begin)
         for(int i=0;i<num_inImg;++i)
         {
-            vector<cv::Mat> sub_inImg(out_img_begin+i*PCANet_params.numFilters[last_stage],out_img_begin+(i+1)*PCANet_params.numFilters[last_stage]);
+            vector<cv::Mat> sub_inImg(out_img_begin+i*PCANet_params.numFilters[0],out_img_begin+(i+1)*PCANet_params.numFilters[0]);
 
-            sub_inImg = PCA_convolution_rmean(sub_inImg,train_result->filters[last_stage+1],PCANet_params.patchSize[last_stage+1]);
+            sub_inImg = PCA_convolution_rmean(sub_inImg,train_result->filters[1],PCANet_params.patchSize[1]);
 
-            cv::Mat test = HashingHist(sub_inImg,PCANet_params);
-            int cc = test.cols;
-            test.copyTo(hashing_result.row(i));
+            cv::Mat hashing_result = HashingHist(sub_inImg,PCANet_params);
 
+            hashing_result_vec[i]=hashing_result.t();
+
+        }//55G here
+        out_image.clear();//effective only when the above is not parallel
+        gettimeofday(&t2,NULL);
+        double duration = t2.tv_sec-t1.tv_sec + (t2.tv_usec - t1.tv_usec)/1000000.0;
+        cout<<"time usage: "<<duration<<"s"<<endl;
+
+        cout<<"getting PCA vectors..."<<endl;
+        gettimeofday(&t1,NULL);
+        for(int i=0;i<PCANet_params.block_num;i++)
+        {
+            cv::Mat tmp;
+            train_result->e_vec.push_back(tmp);
+        }
+        //create a stack to store the reduced vectors in order to save memory
+        //each element contain the 21 reduced vectors of each image
+        cv::Mat *hashing_result_stacks = new cv::Mat[num_inImg];
+        cout<<"start!"<<endl;
+#pragma omp parallel for default(none) num_threads(core_num) shared(num_inImg, hashing_result_stacks)
+        for(int i=0;i<num_inImg;++i)
+        {
+            hashing_result_stacks[i].create(0,PCANet_params.dim_features,CV_32FC1);
+        }
+#pragma omp parallel for default(none) num_threads(4) shared(core_num,num_inImg,hashing_result_vec,hashing_result_stacks,train_result)
+        for(int blk_num=PCANet_params.block_num-1;blk_num>=0;--blk_num)
+        {
+            struct timeval t3;
+            gettimeofday(&t3,NULL);
+            //at most 1.9G. used to extract the feature vectors. all the feature vectors of one bin
+            cv::Mat vecs_of_block = cv::Mat::zeros(num_inImg,10240,CV_32FC1);
+//#pragma omp parallel for default(none) num_threads(core_num) shared(vecs_of_block,num_inImg,hashing_result_vec,blk_num)
+            for(int img_num=0;img_num<num_inImg;++img_num)
+            {
+                cv::Mat M = hashing_result_vec[img_num].row(blk_num);
+                M.copyTo(vecs_of_block.row(img_num));
+            }
+
+            vecs_of_block=vecs_of_block.t();
+
+            ///test for Eigen
+            cv::Mat eigen_vec;
+            MatrixXf eigen_mat;
+            cv2eigen(vecs_of_block,eigen_mat);
+            JacobiSVD<MatrixXf> svd(eigen_mat,ComputeThinU);
+            eigen_mat.resize(0,0);
+            eigen2cv(svd.matrixU(),eigen_vec);
+
+            /*cv::Mat eigen_vec;
+            MatrixXf eigen_mat;
+            cv2eigen(vecs_of_block,eigen_mat);
+            eigen_mat = eigen_mat * eigen_mat.transpose();
+            EigenSolver<MatrixXf> e_solver(eigen_mat,true);
+            eigen2cv(e_solver.eigenvectors(),eigen_vec);*/
+
+            //out_mat<float>("test_eigen",eigen_vec);
+            eigen_vec = eigen_vec.t();
+            /*out_mat<float>("A",vecs_of_block);
+            out_mat<float>("W",singular_value);
+            out_mat<float>("U",eigen_vec);
+            out_mat<float>("Vt",Vt);*/
+            //here rows should be the same as the sample num... empirically
+            if(eigen_vec.rows > 1280)
+            {
+                eigen_vec.pop_back(eigen_vec.rows-1280);//now it has 1280 rows
+            }
+            //out_mat<float>("eigen_vec",eigen_vec);
+//#pragma omp parallel for default(none) num_threads(core_num) shared(hashing_result_stacks,hashing_result_vec,num_inImg,eigen_vec,blk_num)
+            for(int img_num=0;img_num<num_inImg;++img_num)
+            {
+                 cv::Mat reduced_vec = hashing_result_vec[img_num].row(blk_num) * eigen_vec.t();
+                 hashing_result_stacks[img_num].push_back(reduced_vec);
+                 hashing_result_vec[img_num].pop_back(1);//in exchange for memory space
+            }
+
+            train_result->e_vec[blk_num]=eigen_vec;//need to revise the order when testing
+
+            struct timeval t4;
+            gettimeofday(&t4,NULL);
+            float dura = t4.tv_sec-t3.tv_sec + (t4.tv_usec - t3.tv_usec)/1000000.0;
+            char filename[100];
+            sprintf(filename,"%d_%f",blk_num,dura);
+            ofstream of(filename);
+            of.close();
+            //cout<<"Finished PCA for block "<<blk_num<<". "<<"Time usage: "<<duration<<"s"<<endl;
+        }
+        gettimeofday(&t2,NULL);
+        duration = t2.tv_sec-t1.tv_sec + (t2.tv_usec - t1.tv_usec)/1000000.0;
+        cout<<"time usage: "<<duration<<"s"<<endl;
+
+        cout<<"copying to train_result..."<<endl;
+        gettimeofday(&t1,NULL);
+        train_result->feature = cv::Mat::zeros(num_inImg,PCANet_params.dim_features*21,CV_32FC1);
+#pragma omp parallel for default(none) num_threads(core_num) shared(num_inImg,hashing_result_stacks,train_result)
+        for(int img_num = 0;img_num<num_inImg;img_num++)
+        {
+            hashing_result_stacks[img_num] = hashing_result_stacks[img_num].reshape(0,1);
+            hashing_result_stacks[img_num].copyTo(train_result->feature.row(img_num));
+            hashing_result_stacks[img_num].release();
         }
 
+        delete []hashing_result_stacks;
+        gettimeofday(&t2,NULL);
+        duration = t2.tv_sec-t1.tv_sec + (t2.tv_usec - t1.tv_usec)/1000000.0;
+        cout<<"time usage: "<<duration<<"s"<<endl;
     }
-    out_image.clear();
+
     //out_file("stage1",train_result->filters[0]);
     //out_file("stage2",train_result->filters[1]);
 
     //save the result
-    train_result->feature = hashing_result;
     //set the label
     float *labels = new float[train_batch_type.size()];
     for(int i=0;i<train_batch_type.size();i++)
@@ -632,12 +729,8 @@ PCATrainResult *PCANet_train(vector<cv::Mat> &train_batch_img, vector<uchar> &tr
 
     cv::Mat temp(train_batch_type.size(),1,CV_32FC1,labels);
     train_result->label=temp;
-    //out_liblinear("train_liblinear",hashing_result,temp);
+    out_liblinear("train_liblinear",train_result->feature,temp);
     train_batch_type.clear();
-
-    gettimeofday(&t2,NULL);
-    double duration = t2.tv_sec-t1.tv_sec + (t2.tv_usec - t1.tv_usec)/1000000.0;
-    cout<<"time usage: "<<duration<<"s"<<endl;
 
     return train_result;
 }
@@ -649,7 +742,7 @@ void SVMTrain(cv::Mat &features, cv::Mat &labels, CvSVM &SVM)
     //set the parameters
     CvSVMParams SVM_params;
     SVM_params.svm_type = CvSVM::C_SVC;
-    SVM_params.C = 11;
+    SVM_params.C = 10;
     SVM_params.kernel_type = CvSVM::LINEAR;
     SVM_params.term_crit   = cvTermCriteria(CV_TERMCRIT_ITER, 100, 1e-6);//终止准则函数：当迭代次数达到最大值时终止
     //out_mat("features",features);
@@ -670,45 +763,59 @@ void SVMTrain(cv::Mat &features, cv::Mat &labels, CvSVM &SVM)
 }
 ///assume there are 2 stages only
 double test_accuracy(vector<cv::Mat> &test_batch_img, vector<uchar> &test_batch_type,
-                     vector<cv::Mat> &filters, CvSVM &SVM, PCANet &PCANet_params)
+                     vector<cv::Mat> &filters, vector<cv::Mat> PCA_vecs, CvSVM &SVM, PCANet &PCANet_params)
 {
-    int correct_num=0;
+    int correct_num[8]={0};
     int total_num=test_batch_img.size();
 
     vector<cv::Mat>::iterator ite_img =test_batch_img.begin();
     vector<uchar>::iterator ite_label = test_batch_type.begin();
-    float prediction;
-    while(ite_img!=test_batch_img.end())
+    cv::Mat hashing_result_store = cv::Mat::zeros(total_num,PCANet_params.dim_features*PCANet_params.block_num,CV_32FC1);
+    int core_num = omp_get_num_procs();
+#pragma omp parallel for default(none) num_threads(core_num) shared(filters, PCA_vecs, total_num, PCANet_params, hashing_result_store, test_batch_img, SVM,test_batch_type,correct_num)
+    for(int i=0;i<total_num;i++)
     {
-        vector<cv::Mat> temp(ite_img,ite_img+1);//used to store one image
-        //out_file("stage1_in",temp[0]);
+        vector<cv::Mat> temp;
+        temp.push_back(test_batch_img[i]);
 
         temp=PCA_convolution_rmean(temp,filters[0],PCANet_params.patchSize[0]);
 
         temp=PCA_convolution_rmean(temp,filters[1],PCANet_params.patchSize[0]);
 
-        //out_file("stage2_out",temp[0]);
-
-
         cv::Mat hashing_result = HashingHist(temp,PCANet_params);
-        //make prediction
-        hashing_result.convertTo(hashing_result,CV_32FC1);
-        prediction = SVM.predict(hashing_result);
+        cv::Mat hashing_result_t(0,PCANet_params.dim_features,CV_32FC1);
+        for(int blk_num=PCANet_params.block_num-1;blk_num>= 0 ; --blk_num)
+        {
+            cv::Mat tmp = PCA_vecs[blk_num] * hashing_result.col(blk_num);
+            tmp = tmp.t();
+            hashing_result_t.push_back(tmp);
+        }
+        hashing_result = hashing_result_t.reshape(0,1);
+        hashing_result.copyTo(hashing_result_store.row(i));
 
-        if((uchar)prediction == *ite_label)
-            correct_num++;
+        test_batch_img[i].release();
 
-        ite_img = test_batch_img.erase(ite_img);
-        ite_label = test_batch_type.erase(ite_label);
+        float prediction = SVM.predict(hashing_result);
+        int k=omp_get_thread_num();
+        if((uchar)prediction == test_batch_type[i])
+            correct_num[k]++;
     }
 
-    double accuracy = (double)correct_num/total_num;
+    out_liblinear2("test_set",hashing_result_store,test_batch_type);
+    //reduce
+    for(int i=1;i<core_num;i++)
+    {
+        correct_num[0] += correct_num[i];
+    }
+
+    double accuracy = (double)correct_num[0]/total_num;
     return accuracy;
 }
 
 int main(int argc, char **argv)
 {
-    const int SAMPLE_STRIDE=50;//used for subsampling
+
+    const int SAMPLE_STRIDE=4;//used for subsampling
     vector<cv::Mat> train_batch_img;
     vector<uchar> train_batch_type;
     vector<cv::Mat> test_batch_img;
@@ -731,6 +838,9 @@ int main(int argc, char **argv)
     PCANet_params.pyramid.push_back(4);
     PCANet_params.pyramid.push_back(2);
     PCANet_params.pyramid.push_back(1);
+    PCANet_params.block_num = 21;
+    PCANet_params.dim_features = (50000/SAMPLE_STRIDE > 1280) ? 1280 : (50000/SAMPLE_STRIDE);
+
 
     ///read CIFAR-10 training data
     sample_toal_num=read_CIFAR10(train_batch_img,train_batch_type,SAMPLE_STRIDE,true);
@@ -749,9 +859,13 @@ int main(int argc, char **argv)
     //show_img(train_batch[0].img);
     cout<<"Use "<<sample_toal_num<<" samples for testing."<<endl;
 
-    double accuracy = test_accuracy(test_batch_img,test_batch_type,PCA_train_result->filters,SVM,PCANet_params);
+    double accuracy = test_accuracy(test_batch_img,test_batch_type,PCA_train_result->filters,PCA_train_result->e_vec, SVM,PCANet_params);
 
     cout<<accuracy<<endl;
+
+    delete PCA_train_result;
+
+    getchar();
 
     return 0;
 }
